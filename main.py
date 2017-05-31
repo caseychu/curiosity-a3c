@@ -22,7 +22,7 @@ class PolicyNetwork():
     def __init__(self, config, scope, global_step=None, parent_network=None):
         self.config = config
         self.scope = scope
-        self.global_step = None
+        self.global_step = global_step
         
         init_params = {
             "kernel_initializer": tf.contrib.layers.xavier_initializer(),
@@ -121,7 +121,7 @@ class PolicyNetwork():
                 tf.summary.scalar('policy loss', policy_loss),
                 tf.summary.scalar('entropy loss', entropy_loss),
                 tf.summary.scalar('value loss', value_loss),
-                tf.summary.scalar('total loss', value_loss),
+                tf.summary.scalar('total loss', loss),
                 tf.summary.scalar('gradient norm', grad_norm)
             ])
             
@@ -240,7 +240,7 @@ def main():
     
     # Construct the graph
     global_step = tf.Variable(0, trainable=False, name='global_step')
-    global_network = PolicyNetwork(config, 'global', global_step)
+    global_network = PolicyNetwork(config, 'global', global_step=global_step)
     local_networks = [PolicyNetwork(config, 'worker' + str(i), parent_network=global_network) for i in range(num_workers)]
     
     sv = tf.train.Supervisor(logdir=log_dir, summary_op=None, save_summaries_secs=5)
