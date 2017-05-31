@@ -95,11 +95,11 @@ class PolicyNetwork():
             self.actions = actions = tf.placeholder(tf.uint8, shape=(None,))
             self.empirical_values = empirical_values = tf.placeholder(tf.float32, shape=(None,))
             
-            policy_loss = -tf.einsum('ij,ij,i->',
-                log_policies,
-                tf.one_hot(actions, self.config.num_actions),
-                empirical_values - tf.stop_gradient(values))
-            entropy_loss = tf.einsum('ij,ij->', policies, log_policies)
+            policy_loss = -tf.reduce_sum(
+                tf.reduce_sum(log_policies * tf.one_hot(actions, self.config.num_actions), axis=1) *
+                (empirical_values - tf.stop_gradient(values))
+            )
+            entropy_loss = tf.reduce_sum(policies*log_policies)
             value_loss = tf.nn.l2_loss(empirical_values - values)
             loss = policy_loss + .01*entropy_loss + .25*value_loss
             
