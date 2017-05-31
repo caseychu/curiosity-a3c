@@ -4,17 +4,16 @@ import gym
 from gym import wrappers
 from threading import Thread
 import sys
+from AtariPreprocessor import AtariPreprocessor
 
 from test_env import EnvTest
 
 class Config:
-    num_actions = 1
-    state_shape = (1,)
+    num_actions = None
+    state_shape = None
     
-    beta = .1
-    #lr = 1e-4
-    lr = .00025
-    grad_clip = 10
+    lr = 1e-4
+    grad_clip = 40.
     rnn_hidden_size = 256
     gamma = .99
 
@@ -90,31 +89,27 @@ class PolicyNetwork():
                 log_policies,
                 tf.one_hot(actions, self.config.num_actions),
                 empirical_values - tf.stop_gradient(values))
-            entropy_loss = 0#-(-tf.einsum('ij,ij->', policies, log_policies))
+            entropy_loss = tf.einsum('ij,ij->', policies, log_policies)
             value_loss = tf.nn.l2_loss(empirical_values - values)
-            loss = policy_loss + entropy_loss + value_loss
+            loss = policy_loss + .01*entropy_loss + .25*value_loss
             
             grads = tf.gradients(loss, all_variables)
             grads, grad_norm = tf.clip_by_global_norm(grads, self.config.grad_clip)
             optimizer = tf.train.AdamOptimizer(self.config.lr)
             train_op = optimizer.apply_gradients(zip(grads, parent_network.all_variables))
             
-            self.grads = grads
             self.grad_norm = grad_norm
-            self.loss = loss
-            self.optimizer = optimizer
             self.train_op = train_op
             
             # Summaries
             if summarizer is not None:
-                tf.summary.scalar('loss', loss)
                 tf.summary.scalar('gradient norm', grad_norm)
                 self.summaries = tf.summary.merge_all()
         
     def synchronize(self, sess):
         return sess.run(self.sync_op)
     
-    def get_next_policy(self, sess, state, rnn_state):
+    def get_next_policy(self, sess, state, rnn_state=None):
         if rnn_state is None:
             policies, values, next_rnn_state = sess.run([self.policies, self.values, self.next_rnn_state], {
                 self.states: [state]
@@ -128,7 +123,7 @@ class PolicyNetwork():
             
         return policies[0], values[0], next_rnn_state
     
-    def apply_gradients_from_rollout(self, sess, states, actions, empirical_values, rnn_initial_state):
+    def apply_gradients_from_rollout(self, sess, states, actions, empirical_values, rnn_initial_state=None):
         if rnn_initial_state is None:
             gn, _ = sess.run([self.grad_norm, self.train_op], feed_dict={
                 self.states: states,
@@ -151,6 +146,7 @@ def worker(coord, sess, policy_network, env):
         done = True
         state = None
         rnn_state = None
+        episode_reward = 0
         
         while True:
             policy_network.synchronize(sess)
@@ -158,19 +154,23 @@ def worker(coord, sess, policy_network, env):
                 done = False
                 state = env.reset()
                 rnn_state = None
+                episode_reward = 0
 
             # Take a few steps
             history = []
             estimated_value = 0
             rnn_initial_state = rnn_state
-            for _ in xrange(30):
+            for _ in xrange(20):
                 policy, estimated_value, rnn_state = policy_network.get_next_policy(sess, state, rnn_state)
                 action = np.random.choice(policy_network.config.num_actions, p=policy)
                 new_state, reward, done, _ = env.step(action)
+                episode_reward += reward
 
                 history.append((state, action, reward))
                 state = new_state
                 if done:
+                    print ""
+                    print policy_network.scope, 'episode reward: ', episode_reward
                     break
                 
                 if coord.should_stop():
@@ -178,7 +178,7 @@ def worker(coord, sess, policy_network, env):
 
             # Process the experience
             states, actions, rewards = map(np.array, zip(*history))
-            print policy_network.scope, 'true reward: ', np.sum(rewards)
+            #print policy_network.scope, 'reward: ', np.sum(rewards)
 
             future_rewards = [0 if done else estimated_value]
             for reward in reversed(rewards.tolist()[:-1]):
@@ -190,7 +190,7 @@ def worker(coord, sess, policy_network, env):
 
 def main():
     #make_env = lambda: EnvTest((5, 5, 1))
-    make_env = lambda: gym.make('Pong-v0')
+    make_env = lambda: AtariPreprocessor(gym.make('Pong-v0'))
         
     env = make_env()
     config = Config()
@@ -198,7 +198,6 @@ def main():
     config.state_shape = env.observation_space.shape
     
     #env = wrappers.Monitor(env, 'results/1')
-    # preprocess frames?
     
     policy_network = PolicyNetwork(config, 'global')
     
