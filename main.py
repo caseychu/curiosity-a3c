@@ -19,9 +19,10 @@ class Config:
     gamma = .99
 
 class PolicyNetwork():
-    def __init__(self, config, scope, parent_network=None, summarizer=None):
+    def __init__(self, config, scope, global_step=None, parent_network=None):
         self.config = config
         self.scope = scope
+        self.global_step = None
         
         init_params = {
             "kernel_initializer": tf.contrib.layers.xavier_initializer(),
@@ -107,18 +108,33 @@ class PolicyNetwork():
             
             grads = tf.gradients(loss, all_variables)
             grads, grad_norm = tf.clip_by_global_norm(grads, self.config.grad_clip)
-            train_op = parent_network.optimizer.apply_gradients(zip(grads, parent_network.all_variables))
+            train_op = parent_network.optimizer.apply_gradients(
+                zip(grads, parent_network.all_variables),
+                global_step=parent_network.global_step
+            )
             
             self.grad_norm = grad_norm
             self.train_op = train_op
 
-        # Summaries    
-        self.summaries = tf.summary.merge([
-            tf.summary.scalar('policy loss', policy_loss),
-            tf.summary.scalar('entropy loss', entropy_loss),
-            tf.summary.scalar('value loss', value_loss),
-            tf.summary.scalar('gradient norm', grad_norm)
-        ])
+            # Summaries
+            self.training_summaries = tf.summary.merge([
+                tf.summary.scalar('policy loss', policy_loss),
+                tf.summary.scalar('entropy loss', entropy_loss),
+                tf.summary.scalar('value loss', value_loss),
+                tf.summary.scalar('total loss', value_loss),
+                tf.summary.scalar('gradient norm', grad_norm)
+            ])
+            
+            self.episode_reward = tf.placeholder(tf.float32)
+            self.episode_summaries = tf.summary.merge([
+                tf.summary.scalar('episode reward', self.episode_reward)
+            ])
+            
+            self.partial_reward = tf.placeholder(tf.float32)
+            self.partial_summaries = tf.summary.merge([
+                tf.summary.scalar('partial reward', self.partial_reward)
+            ])
+            
         
     def synchronize(self, sess):
         return sess.run(self.sync_op)
@@ -139,13 +155,13 @@ class PolicyNetwork():
     
     def apply_gradients_from_rollout(self, sess, states, actions, empirical_values, rnn_initial_state=None):
         if rnn_initial_state is None:
-            summaries, _ = sess.run([self.summaries, self.train_op], feed_dict={
+            summaries, _ = sess.run([self.training_summaries, self.train_op], feed_dict={
                 self.states: states,
                 self.actions: actions,
                 self.empirical_values: empirical_values
             })
         else:
-            summaries, _ = sess.run([self.summaries, self.train_op], feed_dict={
+            summaries, _ = sess.run([self.training_summaries, self.train_op], feed_dict={
                 self.states: states,
                 self.actions: actions,
                 self.empirical_values: empirical_values,
@@ -154,8 +170,14 @@ class PolicyNetwork():
             })
             
         return summaries
+    
+    def summarize_reward(self, sess, reward, is_partial_reward=False):
+        if is_partial_reward:
+            return sess.run(self.partial_summaries, feed_dict={self.partial_reward: reward})
+        else:
+            return sess.run(self.episode_summaries, feed_dict={self.episode_reward: reward})
 
-def worker(sv, sess, policy_network, env):
+def worker(sv, sess, network, env):
     with sv.coord.stop_on_exception():
         done = True
         state = None
@@ -163,7 +185,7 @@ def worker(sv, sess, policy_network, env):
         episode_reward = 0
         
         while True:
-            policy_network.synchronize(sess)
+            network.synchronize(sess)
             if done:
                 done = False
                 state = env.reset()
@@ -175,31 +197,30 @@ def worker(sv, sess, policy_network, env):
             estimated_value = 0
             rnn_initial_state = rnn_state
             for _ in xrange(20):
-                policy, estimated_value, rnn_state = policy_network.get_next_policy(sess, state, rnn_state)
-                action = np.random.choice(policy_network.config.num_actions, p=policy)
+                policy, estimated_value, rnn_state = network.get_next_policy(sess, state, rnn_state)
+                action = np.random.choice(network.config.num_actions, p=policy)
                 new_state, reward, done, _ = env.step(action)
                 episode_reward += reward
 
                 history.append((state, action, reward))
                 state = new_state
-                if done:
-                    print ""
-                    print policy_network.scope, 'episode reward: ', episode_reward
-                    break
                 
+                if done:
+                    sv.summary_computed(sess, network.summarize_reward(sess, episode_reward))
+                    break
                 if sv.coord.should_stop():
                     return
 
             # Process the experience
             states, actions, rewards = map(np.array, zip(*history))
-            print policy_network.scope, 'reward: ', np.sum(rewards)
+            sv.summary_computed(sess, network.summarize_reward(sess, np.sum(rewards), is_partial_reward=True))
             
             future_rewards = [0 if done else estimated_value]
             for reward in reversed(rewards.tolist()[:-1]):
-                future_rewards.append(reward + policy_network.config.gamma * future_rewards[-1])
+                future_rewards.append(reward + network.config.gamma * future_rewards[-1])
             empirical_values = np.array(list(reversed(future_rewards)))
 
-            summaries = policy_network.apply_gradients_from_rollout(sess, states, actions, empirical_values, rnn_initial_state)
+            summaries = network.apply_gradients_from_rollout(sess, states, actions, empirical_values, rnn_initial_state)
             sv.summary_computed(sess, summaries)
 
 
@@ -207,7 +228,7 @@ def main():
     make_env = lambda: EnvTest((5, 5, 1))
     #make_env = lambda: AtariPreprocessor(gym.make('Pong-v0'))
     log_dir = 'envtest_training'
-    num_workers = 1
+    num_workers = 3
     
     #env = wrappers.Monitor(env, 'results/1')
     
@@ -218,7 +239,8 @@ def main():
     config.state_shape = env.observation_space.shape
     
     # Construct the graph
-    global_network = PolicyNetwork(config, 'global')
+    global_step = tf.Variable(0, trainable=False, name='global_step')
+    global_network = PolicyNetwork(config, 'global', global_step)
     local_networks = [PolicyNetwork(config, 'worker' + str(i), parent_network=global_network) for i in range(num_workers)]
     
     sv = tf.train.Supervisor(logdir=log_dir, summary_op=None, save_summaries_secs=5)
