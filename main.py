@@ -118,21 +118,21 @@ class PolicyNetwork():
 
             # Summaries
             self.training_summaries = tf.summary.merge([
-                tf.summary.scalar('policy loss', policy_loss),
-                tf.summary.scalar('entropy loss', entropy_loss),
-                tf.summary.scalar('value loss', value_loss),
-                tf.summary.scalar('total loss', loss),
+                tf.summary.scalar('loss policy', policy_loss),
+                tf.summary.scalar('loss entropy', entropy_loss),
+                tf.summary.scalar('loss value', value_loss),
+                tf.summary.scalar('loss total', loss),
                 tf.summary.scalar('gradient norm', grad_norm)
             ])
             
             self.episode_reward = tf.placeholder(tf.float32)
             self.episode_summaries = tf.summary.merge([
-                tf.summary.scalar('episode reward', self.episode_reward)
+                tf.summary.scalar('reward episode', self.episode_reward)
             ])
             
             self.partial_reward = tf.placeholder(tf.float32)
             self.partial_summaries = tf.summary.merge([
-                tf.summary.scalar('partial reward', self.partial_reward)
+                tf.summary.scalar('reward partial', self.partial_reward)
             ])
             
         
@@ -225,10 +225,10 @@ def worker(sv, sess, network, env):
 
 
 def main():
-    make_env = lambda: EnvTest((5, 5, 1))
-    #make_env = lambda: AtariPreprocessor(gym.make('Pong-v0'))
-    log_dir = 'envtest_training'
-    num_workers = 3
+    #make_env = lambda: EnvTest((5, 5, 1))
+    make_env = lambda: AtariPreprocessor(gym.make('Pong-v0'))
+    log_dir = 'data_pong'
+    num_workers = 5
     
     #env = wrappers.Monitor(env, 'results/1')
     

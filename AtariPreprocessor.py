@@ -11,23 +11,30 @@ class AtariPreprocessor(Wrapper):
         assert o.shape == (210, 160, 3)
         
         self.history = None
-        self.num_frames = 4
-        self.observation_space = Box(o.low[0,0,0], o.high[0,0,0], shape=(o.shape[0]/2, o.shape[1]/2, self.num_frames))
+        self.num_frames_to_stack = 4
+        self.num_actions_to_repeat = 4
+        self.observation_space = Box(o.low[0,0,0], o.high[0,0,0], shape=(o.shape[0]/2, o.shape[1]/2, self.num_frames_to_stack))
     
     def get_state(self):
         frames = []
-        for frame in self.history:
+        for frame in self.history[-self.num_frames_to_stack:]:
             frame = np.dot(frame, [0.299, 0.587, 0.114])
             frame = frame[::2,::2]
             frames.append(frame)
         return np.stack(frames, axis=-1)
     
     def _step(self, action):
-        state, reward, done, info = self.env.step(action)
-        self.history.pop(0)
-        self.history.append(state)
-        return self.get_state(), reward, done, info
+        total_rewards = 0
+        done = False
+        for i in range(self.num_actions_to_repeat):
+            state, reward, done, info = self.env.step(action)
+            total_rewards += reward
+            self.history.pop(0)
+            self.history.append(state)
+            if done:
+                break
+        return self.get_state(), total_rewards, done, info
     
     def _reset(self):
-        self.history = [self.env.reset()] * self.num_frames
+        self.history = [self.env.reset()] * self.num_frames_to_stack
         return self.get_state()
