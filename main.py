@@ -128,26 +128,42 @@ class PolicyNetwork():
             
         return policies[0], values[0], next_rnn_state
     
-    def apply_gradients_from_rollout(self, sess, states, actions, empirical_values):
-        g, gn, l, _ = sess.run([self.grads, self.grad_norm, self.loss, self.train_op], feed_dict={
-            self.states: states,
-            self.actions: actions,
-            self.empirical_values: empirical_values
-        })
-        #print self.scope, 'grad norm: ', gn, '; loss: ', l
-        return g
+    def apply_gradients_from_rollout(self, sess, states, actions, empirical_values, rnn_initial_state):
+        if rnn_initial_state is None:
+            gn, _ = sess.run([self.grad_norm, self.train_op], feed_dict={
+                self.states: states,
+                self.actions: actions,
+                self.empirical_values: empirical_values
+            })
+        else:
+            gn, _ = sess.run([self.grad_norm, self.train_op], feed_dict={
+                self.states: states,
+                self.actions: actions,
+                self.empirical_values: empirical_values,
+                self.rnn_state[0]: rnn_initial_state[0],
+                self.rnn_state[1]: rnn_initial_state[1]
+            })
+            
+        return gn
 
-def worker(coord, sess, policy_network, env, max_episode_length=20):
+def worker(coord, sess, policy_network, env):
     with coord.stop_on_exception():
-        while not coord.should_stop():
+        done = True
+        state = None
+        rnn_state = None
+        
+        while True:
             policy_network.synchronize(sess)
-            rnn_state = None
-            state = env.reset()
+            if done:
+                done = False
+                state = env.reset()
+                rnn_state = None
 
+            # Take a few steps
             history = []
-            done = False
             estimated_value = 0
-            for _ in xrange(max_episode_length):
+            rnn_initial_state = rnn_state
+            for _ in xrange(30):
                 policy, estimated_value, rnn_state = policy_network.get_next_policy(sess, state, rnn_state)
                 action = np.random.choice(policy_network.config.num_actions, p=policy)
                 new_state, reward, done, _ = env.step(action)
@@ -156,7 +172,11 @@ def worker(coord, sess, policy_network, env, max_episode_length=20):
                 state = new_state
                 if done:
                     break
+                
+                if coord.should_stop():
+                    return
 
+            # Process the experience
             states, actions, rewards = map(np.array, zip(*history))
             print policy_network.scope, 'true reward: ', np.sum(rewards)
 
@@ -165,19 +185,19 @@ def worker(coord, sess, policy_network, env, max_episode_length=20):
                 future_rewards.append(reward + policy_network.config.gamma * future_rewards[-1])
             empirical_values = np.array(list(reversed(future_rewards)))
 
-            policy_network.apply_gradients_from_rollout(sess, states, actions, empirical_values)
+            policy_network.apply_gradients_from_rollout(sess, states, actions, empirical_values, rnn_initial_state)
 
 
 def main():
-    make_env = lambda: EnvTest((5, 5, 1))
-    #gym.make('Pong-v0')
+    #make_env = lambda: EnvTest((5, 5, 1))
+    make_env = lambda: gym.make('Pong-v0')
         
     env = make_env()
     config = Config()
     config.num_actions = env.action_space.n
     config.state_shape = env.observation_space.shape
     
-    #env = wrappers.Monitor(env, 'results/experiments')
+    #env = wrappers.Monitor(env, 'results/1')
     # preprocess frames?
     
     policy_network = PolicyNetwork(config, 'global')
