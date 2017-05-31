@@ -5,7 +5,6 @@ from gym import wrappers
 from threading import Thread
 import sys
 
-import time
 from test_env import EnvTest
 
 class Config:
@@ -13,13 +12,14 @@ class Config:
     state_shape = (1,)
     
     beta = .1
-    lr = 1e-4
+    #lr = 1e-4
+    lr = .00025
     grad_clip = 10
     rnn_hidden_size = 256
     gamma = .99
 
 class PolicyNetwork():
-    def __init__(self, config, scope, parent_network=None):
+    def __init__(self, config, scope, parent_network=None, summarizer=None):
         self.config = config
         self.scope = scope
 
@@ -84,14 +84,13 @@ class PolicyNetwork():
 
             # Gradients.
             self.actions = actions = tf.placeholder(tf.uint8, shape=(None,))
-            self.estimated_values = estimated_values = tf.placeholder(tf.float32, shape=(None,))
             self.empirical_values = empirical_values = tf.placeholder(tf.float32, shape=(None,))
             
-            policy_loss = tf.einsum('ij,ij,i->',
+            policy_loss = -tf.einsum('ij,ij,i->',
                 log_policies,
                 tf.one_hot(actions, self.config.num_actions),
-                empirical_values - estimated_values)
-            entropy_loss = -(-tf.einsum('ij,ij->', policies, log_policies))
+                empirical_values - tf.stop_gradient(values))
+            entropy_loss = 0#-(-tf.einsum('ij,ij->', policies, log_policies))
             value_loss = tf.nn.l2_loss(empirical_values - values)
             loss = policy_loss + entropy_loss + value_loss
             
@@ -107,9 +106,10 @@ class PolicyNetwork():
             self.train_op = train_op
             
             # Summaries
-            tf.summary.scalar('loss', loss)
-            tf.summary.scalar('gradient norm', grad_norm)
-            self.summaries = tf.summary.merge_all()
+            if summarizer is not None:
+                tf.summary.scalar('loss', loss)
+                tf.summary.scalar('gradient norm', grad_norm)
+                self.summaries = tf.summary.merge_all()
         
     def synchronize(self, sess):
         return sess.run(self.sync_op)
@@ -128,15 +128,13 @@ class PolicyNetwork():
             
         return policies[0], values[0], next_rnn_state
     
-    def apply_gradients_from_rollout(self, sess, states, actions, estimated_values, empirical_values):
+    def apply_gradients_from_rollout(self, sess, states, actions, empirical_values):
         g, gn, l, _ = sess.run([self.grads, self.grad_norm, self.loss, self.train_op], feed_dict={
             self.states: states,
             self.actions: actions,
-            self.estimated_values: estimated_values,
             self.empirical_values: empirical_values
         })
         #print self.scope, 'grad norm: ', gn, '; loss: ', l
-        sys.stdout.flush()
         return g
 
 def worker(coord, sess, policy_network, env, max_episode_length=20):
@@ -148,26 +146,26 @@ def worker(coord, sess, policy_network, env, max_episode_length=20):
 
             history = []
             done = False
-            value = 0
+            estimated_value = 0
             for _ in xrange(max_episode_length):
-                policy, value, rnn_state = policy_network.get_next_policy(sess, state, rnn_state)
+                policy, estimated_value, rnn_state = policy_network.get_next_policy(sess, state, rnn_state)
                 action = np.random.choice(policy_network.config.num_actions, p=policy)
                 new_state, reward, done, _ = env.step(action)
 
-                history.append((state, action, value, reward))
+                history.append((state, action, reward))
                 state = new_state
                 if done:
                     break
 
-            states, actions, estimated_values, rewards = map(np.array, zip(*history))
+            states, actions, rewards = map(np.array, zip(*history))
             print policy_network.scope, 'true reward: ', np.sum(rewards)
 
-            future_rewards = [0 if done else value]
+            future_rewards = [0 if done else estimated_value]
             for reward in reversed(rewards.tolist()[:-1]):
                 future_rewards.append(reward + policy_network.config.gamma * future_rewards[-1])
             empirical_values = np.array(list(reversed(future_rewards)))
 
-            policy_network.apply_gradients_from_rollout(sess, states, actions, estimated_values, empirical_values)
+            policy_network.apply_gradients_from_rollout(sess, states, actions, empirical_values)
 
 
 def main():
@@ -185,9 +183,11 @@ def main():
     policy_network = PolicyNetwork(config, 'global')
     
     sess = tf.Session()
+    #writer = tf.summary.FileWriter('log', sess.graph)
+
     coord = tf.train.Coordinator()
     threads = []
-    for i in xrange(2):
+    for i in xrange(3):
         local_env = make_env()
         local_policy_network = PolicyNetwork(config, 'worker' + str(i), parent_network=policy_network)
         threads.append(Thread(target=worker, args=(coord, sess, local_policy_network, local_env)))
