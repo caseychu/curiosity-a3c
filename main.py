@@ -21,28 +21,38 @@ class PolicyNetwork():
     def __init__(self, config, scope, parent_network=None, summarizer=None):
         self.config = config
         self.scope = scope
+        
+        init_params = {
+            "kernel_initializer": tf.contrib.layers.xavier_initializer(),
+            "bias_initializer": tf.zeros_initializer()
+        }
+        
+        # If we have a parent network, make these local variables
+        if parent_network is not None:
+            def custom_getter(getter, *args, **kwargs):
+                if kwargs['collections'] is None:
+                    kwargs['collections'] = []
+                kwargs['collections'] += [tf.GraphKeys.LOCAL_VARIABLES]
+                return getter(*args, **kwargs)
+        else:
+            custom_getter = None
 
         if parent_network is None:
             parent_network = self
         
-        init_params = {
-            "weights_initializer": tf.contrib.layers.xavier_initializer(),
-            "biases_initializer": tf.zeros_initializer()
-        }
-        
-        with tf.variable_scope(scope):
+        with tf.variable_scope(scope, custom_getter=custom_getter):
             self.states = states = tf.placeholder(tf.float32, shape=(None,) + self.config.state_shape)
             
             # The main architecture: 4 conv layers into an LSTM, into two fully connected layers.
             out = states
             for i in range(4):
-                out = tf.contrib.layers.conv2d(
+                out = tf.layers.conv2d(
                     inputs=out,
+                    filters=32,
                     kernel_size=3,
-                    num_outputs=32,
-                    stride=2,
-                    padding="SAME",
-                    activation_fn=tf.nn.elu,
+                    strides=2,
+                    padding="same",
+                    activation=tf.nn.elu,
                     **init_params)
                 
             cell = tf.contrib.rnn.BasicLSTMCell(self.config.rnn_hidden_size)
@@ -52,18 +62,16 @@ class PolicyNetwork():
             out, next_rnn_state = tf.nn.dynamic_rnn(cell, tf.expand_dims(out, 0), initial_state=rnn_state)
             out = tf.squeeze(out, [0])
 
-            policy_logits = tf.contrib.layers.fully_connected(
+            policy_logits = tf.layers.dense(
                 inputs=out,
-                num_outputs=self.config.num_actions,
-                activation_fn=None,
+                units=self.config.num_actions,
                 **init_params
             )
             log_policies = tf.nn.log_softmax(policy_logits)
             policies = tf.nn.softmax(policy_logits)
-            values = tf.contrib.layers.fully_connected(
+            values = tf.layers.dense(
                 inputs=out,
-                num_outputs=1,
-                activation_fn=None,
+                units=1,
                 **init_params
             )
             values = tf.squeeze(values, -1)
@@ -93,10 +101,12 @@ class PolicyNetwork():
             value_loss = tf.nn.l2_loss(empirical_values - values)
             loss = policy_loss + .01*entropy_loss + .25*value_loss
             
+            optimizer = tf.train.AdamOptimizer(self.config.lr)
+            self.optimizer = optimizer
+            
             grads = tf.gradients(loss, all_variables)
             grads, grad_norm = tf.clip_by_global_norm(grads, self.config.grad_clip)
-            optimizer = tf.train.AdamOptimizer(self.config.lr)
-            train_op = optimizer.apply_gradients(zip(grads, parent_network.all_variables))
+            train_op = parent_network.optimizer.apply_gradients(zip(grads, parent_network.all_variables))
             
             self.grad_norm = grad_norm
             self.train_op = train_op
@@ -178,7 +188,7 @@ def worker(coord, sess, policy_network, env):
 
             # Process the experience
             states, actions, rewards = map(np.array, zip(*history))
-            #print policy_network.scope, 'reward: ', np.sum(rewards)
+            print policy_network.scope, 'reward: ', np.sum(rewards)
 
             future_rewards = [0 if done else estimated_value]
             for reward in reversed(rewards.tolist()[:-1]):
@@ -189,36 +199,44 @@ def worker(coord, sess, policy_network, env):
 
 
 def main():
-    #make_env = lambda: EnvTest((5, 5, 1))
-    make_env = lambda: AtariPreprocessor(gym.make('Pong-v0'))
-        
+    make_env = lambda: EnvTest((5, 5, 1))
+    #make_env = lambda: AtariPreprocessor(gym.make('Pong-v0'))
+    log_dir = 'envtest_training'
+    num_workers = 3
+    
+    #env = wrappers.Monitor(env, 'results/1')
+    
+    # Define config
     env = make_env()
     config = Config()
     config.num_actions = env.action_space.n
     config.state_shape = env.observation_space.shape
     
-    #env = wrappers.Monitor(env, 'results/1')
+    # Construct the graph
+    global_network = PolicyNetwork(config, 'global')
+    local_networks = [PolicyNetwork(config, 'worker' + str(i), parent_network=global_network) for i in range(num_workers)]
     
-    policy_network = PolicyNetwork(config, 'global')
+    print 'global: ', [v.name for v in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)]
+    print ''
+    print 'local: ', [v.name for v in tf.get_collection(tf.GraphKeys.LOCAL_VARIABLES)]
     
-    sess = tf.Session()
-    #writer = tf.summary.FileWriter('log', sess.graph)
+    saver = tf.train.Saver()
+    sv = tf.train.Supervisor(logdir=log_dir, saver=saver, save_model_secs=10)
+    with sv.managed_session() as sess:
+        #writer = tf.summary.FileWriter('log', sess.graph)
 
-    coord = tf.train.Coordinator()
-    threads = []
-    for i in xrange(3):
-        local_env = make_env()
-        local_policy_network = PolicyNetwork(config, 'worker' + str(i), parent_network=policy_network)
-        threads.append(Thread(target=worker, args=(coord, sess, local_policy_network, local_env)))
-    
-    sess.run(tf.global_variables_initializer())
-    
-    try:
-        for t in threads:
-            t.start()
-        coord.join(threads, stop_grace_period_secs=5)
-    except KeyboardInterrupt:
-        coord.request_stop()
-        raise
+        # Create threads
+        #coord = tf.train.Coordinator()
+        coord = sv.coord
+        threads = [Thread(target=worker, args=(coord, sess, network, make_env())) for network in local_networks]
+
+        print "Starting training..."
+        try:
+            for t in threads:
+                t.start()
+            coord.join(threads, stop_grace_period_secs=5)
+        except KeyboardInterrupt:
+            coord.request_stop()
+            raise
 
 main()
