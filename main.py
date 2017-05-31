@@ -7,6 +7,7 @@ import sys
 from AtariPreprocessor import AtariPreprocessor
 
 from test_env import EnvTest
+import time
 
 class Config:
     num_actions = None
@@ -110,11 +111,14 @@ class PolicyNetwork():
             
             self.grad_norm = grad_norm
             self.train_op = train_op
-            
-            # Summaries
-            if summarizer is not None:
-                tf.summary.scalar('gradient norm', grad_norm)
-                self.summaries = tf.summary.merge_all()
+
+        # Summaries    
+        self.summaries = tf.summary.merge([
+            tf.summary.scalar('policy loss', policy_loss),
+            tf.summary.scalar('entropy loss', entropy_loss),
+            tf.summary.scalar('value loss', value_loss),
+            tf.summary.scalar('gradient norm', grad_norm)
+        ])
         
     def synchronize(self, sess):
         return sess.run(self.sync_op)
@@ -135,13 +139,13 @@ class PolicyNetwork():
     
     def apply_gradients_from_rollout(self, sess, states, actions, empirical_values, rnn_initial_state=None):
         if rnn_initial_state is None:
-            gn, _ = sess.run([self.grad_norm, self.train_op], feed_dict={
+            summaries, _ = sess.run([self.summaries, self.train_op], feed_dict={
                 self.states: states,
                 self.actions: actions,
                 self.empirical_values: empirical_values
             })
         else:
-            gn, _ = sess.run([self.grad_norm, self.train_op], feed_dict={
+            summaries, _ = sess.run([self.summaries, self.train_op], feed_dict={
                 self.states: states,
                 self.actions: actions,
                 self.empirical_values: empirical_values,
@@ -149,10 +153,10 @@ class PolicyNetwork():
                 self.rnn_state[1]: rnn_initial_state[1]
             })
             
-        return gn
+        return summaries
 
-def worker(coord, sess, policy_network, env):
-    with coord.stop_on_exception():
+def worker(sv, sess, policy_network, env):
+    with sv.coord.stop_on_exception():
         done = True
         state = None
         rnn_state = None
@@ -183,26 +187,27 @@ def worker(coord, sess, policy_network, env):
                     print policy_network.scope, 'episode reward: ', episode_reward
                     break
                 
-                if coord.should_stop():
+                if sv.coord.should_stop():
                     return
 
             # Process the experience
             states, actions, rewards = map(np.array, zip(*history))
             print policy_network.scope, 'reward: ', np.sum(rewards)
-
+            
             future_rewards = [0 if done else estimated_value]
             for reward in reversed(rewards.tolist()[:-1]):
                 future_rewards.append(reward + policy_network.config.gamma * future_rewards[-1])
             empirical_values = np.array(list(reversed(future_rewards)))
 
-            policy_network.apply_gradients_from_rollout(sess, states, actions, empirical_values, rnn_initial_state)
+            summaries = policy_network.apply_gradients_from_rollout(sess, states, actions, empirical_values, rnn_initial_state)
+            sv.summary_computed(sess, summaries)
 
 
 def main():
     make_env = lambda: EnvTest((5, 5, 1))
     #make_env = lambda: AtariPreprocessor(gym.make('Pong-v0'))
     log_dir = 'envtest_training'
-    num_workers = 3
+    num_workers = 1
     
     #env = wrappers.Monitor(env, 'results/1')
     
@@ -216,27 +221,18 @@ def main():
     global_network = PolicyNetwork(config, 'global')
     local_networks = [PolicyNetwork(config, 'worker' + str(i), parent_network=global_network) for i in range(num_workers)]
     
-    print 'global: ', [v.name for v in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)]
-    print ''
-    print 'local: ', [v.name for v in tf.get_collection(tf.GraphKeys.LOCAL_VARIABLES)]
-    
-    saver = tf.train.Saver()
-    sv = tf.train.Supervisor(logdir=log_dir, saver=saver, save_model_secs=10)
+    sv = tf.train.Supervisor(logdir=log_dir, summary_op=None, save_summaries_secs=5)
     with sv.managed_session() as sess:
-        #writer = tf.summary.FileWriter('log', sess.graph)
 
         # Create threads
-        #coord = tf.train.Coordinator()
-        coord = sv.coord
-        threads = [Thread(target=worker, args=(coord, sess, network, make_env())) for network in local_networks]
+        threads = [Thread(target=worker, args=(sv, sess, network, make_env())) for network in local_networks]
 
         print "Starting training..."
         try:
             for t in threads:
                 t.start()
-            coord.join(threads, stop_grace_period_secs=5)
+            sv.coord.join(threads, stop_grace_period_secs=1)
         except KeyboardInterrupt:
-            coord.request_stop()
-            raise
+            sv.coord.request_stop()
 
 main()
