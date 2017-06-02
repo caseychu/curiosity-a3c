@@ -18,7 +18,7 @@ class AtariPreprocessor(Wrapper):
     def get_state(self):
         frames = []
         for frame in self.history[-self.num_frames_to_stack:]:
-            frame = np.dot(frame, [0.299, 0.587, 0.114])
+            frame = np.dot(frame / 255., [0.299, 0.587, 0.114])
             frame = frame[::2,::2]
             frames.append(frame)
         return np.stack(frames, axis=-1)
@@ -38,3 +38,6 @@ class AtariPreprocessor(Wrapper):
     def _reset(self):
         self.history = [self.env.reset()] * self.num_frames_to_stack
         return self.get_state()
+    
+    def _render(self, mode='rgb_array', close=False):
+        return np.stack([self.get_state()[:-1,:,0].astype(np.uint8)]*3, axis=-1)

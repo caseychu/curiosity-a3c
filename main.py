@@ -6,14 +6,14 @@ from threading import Thread
 import sys
 from AtariPreprocessor import AtariPreprocessor
 
-from test_env import EnvTest
+#from test_env import EnvTest
 import time
 
 class Config:
     num_actions = None
     state_shape = None
     
-    lr = 1e-4
+    lr = 1e-3
     grad_clip = 40.
     rnn_hidden_size = 256
     gamma = .99
@@ -213,7 +213,7 @@ def worker(sv, sess, network, env):
 
             # Process the experience
             states, actions, rewards = map(np.array, zip(*history))
-            sv.summary_computed(sess, network.summarize_reward(sess, np.sum(rewards), is_partial_reward=True))
+            #sv.summary_computed(sess, network.summarize_reward(sess, np.sum(rewards), is_partial_reward=True))
             
             future_rewards = [0 if done else estimated_value]
             for reward in reversed(rewards.tolist()[:-1]):
@@ -227,8 +227,8 @@ def worker(sv, sess, network, env):
 def main():
     #make_env = lambda: EnvTest((5, 5, 1))
     make_env = lambda: AtariPreprocessor(gym.make('Pong-v0'))
-    log_dir = 'data_pong'
-    num_workers = 5
+    log_dir = 'pong_scaled'
+    num_workers = 6
     
     #env = wrappers.Monitor(env, 'results/1')
     
@@ -243,7 +243,7 @@ def main():
     global_network = PolicyNetwork(config, 'global', global_step=global_step)
     local_networks = [PolicyNetwork(config, 'worker' + str(i), parent_network=global_network) for i in range(num_workers)]
     
-    sv = tf.train.Supervisor(logdir=log_dir, summary_op=None, save_summaries_secs=5)
+    sv = tf.train.Supervisor(logdir=log_dir, summary_op=None) #, save_summaries_secs=5)
     with sv.managed_session() as sess:
 
         # Create threads
